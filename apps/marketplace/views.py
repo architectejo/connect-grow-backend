@@ -1,14 +1,17 @@
-from rest_framework.views import APIView
-from django.db.models import Sum
-from datetime import timedelta
+from django.db.models import Exists, F, OuterRef, Q
 from django.utils.timezone import now
 from rest_framework.decorators import action
 from rest_framework.response import Response
-from rest_framework import viewsets, permissions
-from .models import City, Category, Post, Commune, PostViewStat
-from .serializers import CitySerializer, CategorySerializer, PostSerializer, CommuneSerializer
-from django.utils.timezone import now
-from django.db.models import F
+from rest_framework import status, viewsets, permissions
+from .models import City, Category, Favorite, Post, PostImage, Commune, PostViewStat
+from .serializers import (
+    CategorySerializer,
+    CitySerializer,
+    CommuneSerializer,
+    FavoriteSerializer,
+    PostImageSerializer,
+    PostSerializer,
+)
 
 class CityViewSet(viewsets.ReadOnlyModelViewSet):
     queryset = City.objects.all().prefetch_related('communes')
@@ -29,40 +32,82 @@ class PostViewSet(viewsets.ModelViewSet):
     serializer_class = PostSerializer
 
     def get_queryset(self):
-        from django.db.models import Q
         # On trie par le score de visibilité "Trust & Engage" par défaut
         ordering = self.request.query_params.get('ordering', '-visibility_score')
-        
+        if ordering not in ('-visibility_score', 'visibility_score', '-created_at', 'created_at', 'price', '-price'):
+            ordering = '-visibility_score'
+
         # Par défaut (Marketplace), on ne montre que ce qui n'est pas supprimé et actif
         queryset = Post.objects.filter(is_active=True, is_delete=False)
-        
+
         # Filtre pour récupérer les annonces de l'utilisateur connecté
         my_posts = self.request.query_params.get('my_posts')
         if my_posts == 'true' and self.request.user.is_authenticated:
-            return Post.objects.filter(seller=self.request.user, is_delete=False).order_by('-created_at')
+            queryset = Post.objects.filter(seller=self.request.user, is_delete=False)
+        else:
+            # --- FILTRES DYNAMIQUES (CDC 3.2) ---
+            search = self.request.query_params.get('search')
+            category = self.request.query_params.get('category')
+            location = self.request.query_params.get('location')
+            city = self.request.query_params.get('city')
+            commune = self.request.query_params.get('commune')
+            currency = self.request.query_params.get('currency')
+            condition = self.request.query_params.get('condition')
+            is_exchangeable = self.request.query_params.get('is_exchangeable')
+            price_min = self.request.query_params.get('price_min')
+            price_max = self.request.query_params.get('price_max')
 
-        # --- FILTRES DYNAMIQUES ---
-        search = self.request.query_params.get('search')
-        category = self.request.query_params.get('category')
-        location = self.request.query_params.get('location')
+            if search:
+                queryset = queryset.filter(Q(title__icontains=search) | Q(description__icontains=search))
 
-        if search:
-            queryset = queryset.filter(Q(title__icontains=search) | Q(description__icontains=search))
-        
-        if category:
-            queryset = queryset.filter(category_id=category)
-            
-        if location:
-            queryset = queryset.filter(
-                Q(commune__name__icontains=location) | 
-                Q(commune__city__name__icontains=location)
+            if category:
+                queryset = queryset.filter(category_id=category)
+
+            if location:
+                queryset = queryset.filter(
+                    Q(commune__name__icontains=location) |
+                    Q(commune__city__name__icontains=location)
+                )
+
+            if city:
+                queryset = queryset.filter(commune__city_id=city)
+
+            if commune:
+                queryset = queryset.filter(commune_id=commune)
+
+            if currency in ('USD', 'CDF'):
+                queryset = queryset.filter(currency=currency)
+
+            if condition:
+                queryset = queryset.filter(condition=condition)
+
+            if is_exchangeable is not None:
+                queryset = queryset.filter(is_exchangeable=is_exchangeable.lower() == 'true')
+
+            if price_min:
+                queryset = queryset.filter(price__gte=price_min)
+
+            if price_max:
+                queryset = queryset.filter(price__lte=price_max)
+
+            seller = self.request.query_params.get('seller')
+            if seller:
+                queryset = queryset.filter(seller_id=seller)
+
+        if self.request.user.is_authenticated:
+            # Évite le N+1 de is_favorited sur les listes.
+            queryset = queryset.annotate(
+                is_favorited_by_user=Exists(
+                    Favorite.objects.filter(user=self.request.user, post=OuterRef('pk'))
+                )
             )
 
-        seller = self.request.query_params.get('seller')
-        if seller:
-            queryset = queryset.filter(seller_id=seller)
-            
         return queryset.order_by(ordering)
+
+    def get_serializer_context(self):
+        context = super().get_serializer_context()
+        context['request'] = self.request
+        return context
 
     @action(detail=False, methods=['post'], permission_classes=[permissions.IsAdminUser])
     def recalculate_all_scores(self, request):
@@ -95,8 +140,9 @@ class PostViewSet(viewsets.ModelViewSet):
         post = self.get_object()
         if post.seller != request.user:
             return Response({"error": "Action non autorisée"}, status=403)
-        
+
         post.is_delete = True
+        post.deleted_at = now()
         post.save()
         return Response({"message": "Annonce déplacée dans la corbeille"})
 
@@ -106,20 +152,62 @@ class PostViewSet(viewsets.ModelViewSet):
         # On cherche dans tous les objets (même supprimés) pour pouvoir restaurer
         post = Post.objects.get(pk=pk, seller=request.user)
         post.is_delete = False
+        post.deleted_at = None
         post.save()
         return Response({"message": "Annonce restaurée"})
-    
+
     # 4. Action pour supprimer définitivement une annonce
     @action(detail=True, methods=['delete'], permission_classes=[permissions.IsAuthenticated])
     def hard_delete(self, request, pk=None):
         post = Post.objects.get(pk=pk, seller=request.user)
         post.delete()
         return Response({"message": "Annonce supprimée définitivement"})
-        
+
+    # 5. Galerie de photos (CDC 3.2 : 1 à 8 photos par annonce, main_image comprise)
+    @action(detail=True, methods=['post'], permission_classes=[permissions.IsAuthenticated])
+    def images(self, request, pk=None):
+        post = self.get_object()
+        if post.seller != request.user:
+            return Response({"error": "Action non autorisée"}, status=status.HTTP_403_FORBIDDEN)
+
+        current_count = post.images.count() + 1  # + main_image
+        uploaded = request.FILES.getlist('image')
+        if not uploaded:
+            return Response({"error": "Aucune image fournie."}, status=status.HTTP_400_BAD_REQUEST)
+        if current_count + len(uploaded) > PostImage.MAX_IMAGES_PER_POST:
+            return Response(
+                {"error": f"Une annonce ne peut pas dépasser {PostImage.MAX_IMAGES_PER_POST} photos."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        created = [PostImage.objects.create(post=post, image=f) for f in uploaded]
+        return Response(PostImageSerializer(created, many=True).data, status=status.HTTP_201_CREATED)
+
+    @images.mapping.delete
+    def delete_image(self, request, pk=None):
+        post = self.get_object()
+        if post.seller != request.user:
+            return Response({"error": "Action non autorisée"}, status=status.HTTP_403_FORBIDDEN)
+
+        image_id = request.query_params.get('image_id')
+        deleted, _ = post.images.filter(pk=image_id).delete()
+        if not deleted:
+            return Response({"error": "Photo introuvable."}, status=status.HTTP_404_NOT_FOUND)
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+    # 6. Favoris (CDC 3.2)
+    @action(detail=True, methods=['post'], permission_classes=[permissions.IsAuthenticated])
+    def favorite(self, request, pk=None):
+        post = self.get_object()
+        favorite, created = Favorite.objects.get_or_create(user=request.user, post=post)
+        if not created:
+            favorite.delete()
+            return Response({"favorited": False})
+        return Response({"favorited": True})
 
     def retrieve(self, request, *args, **kwargs):
         instance = self.get_object()
-        
+
         viewed_posts = request.COOKIES.get('viewed_posts', '')
         viewed_ids = viewed_posts.split(',') if viewed_posts else []
 
@@ -129,7 +217,7 @@ class PostViewSet(viewsets.ModelViewSet):
             # Mise à jour du score de visibilité
             instance.update_visibility_score()
             instance.save(update_fields=['views_count', 'visibility_score', 'last_score_update'])
-            
+
             # Mise à jour des stats journalières
             stat, created = PostViewStat.objects.get_or_create(
                 post=instance,
@@ -149,73 +237,26 @@ class PostViewSet(viewsets.ModelViewSet):
 
         new_viewed_str = ','.join(viewed_ids)
         response.set_cookie(
-            'viewed_posts', 
-            new_viewed_str, 
+            'viewed_posts',
+            new_viewed_str,
             max_age=86400,
             httponly=True,
             samesite='Lax',
             secure=False
         )
 
-        return response    
+        return response
 
 
-class DashboardStatsView(APIView):
-    """
-    Vue pour récupérer les statistiques du tableau de bord d'un vendeur.
-    Retourne un résumé global et les données quotidiennes pour le graphique.
-    """
+class FavoriteViewSet(viewsets.ModelViewSet):
+    """Liste personnelle des favoris de l'utilisateur connecté (CDC 3.2)."""
+
+    serializer_class = FavoriteSerializer
     permission_classes = [permissions.IsAuthenticated]
+    http_method_names = ['get', 'post', 'delete']
 
-    def get(self, request):
-        today = now().date()
-        user_posts = Post.objects.filter(seller=request.user, is_delete=False)
+    def get_queryset(self):
+        return Favorite.objects.filter(user=self.request.user).select_related('post')
 
-        # 1. Calcul des statistiques pour les cartes (Summary)
-        # Vues totales cumulées sur tous les posts du vendeur
-        total_views = user_posts.aggregate(total=Sum('views_count'))['total'] or 0
-        
-        # Vues spécifiquement enregistrées aujourd'hui dans PostViewStat
-        today_views = PostViewStat.objects.filter(
-            seller=request.user, 
-            date=today
-        ).aggregate(total=Sum('views'))['total'] or 0
-
-        # Nombre d'annonces actuellement en ligne
-        active_count = user_posts.filter(is_active=True).count()
-
-        # Note moyenne (Exemple statique, à lier à votre modèle de Reviews si existant)
-        avg_rating = 4.8 
-
-        # 2. Préparation des données du graphique (30 derniers jours)
-        start_date = today - timedelta(days=29)
-        
-        # Récupération des stats groupées par date
-        daily_stats = PostViewStat.objects.filter(
-            seller=request.user,
-            date__range=[start_date, today]
-        ).values('date').annotate(total_views=Sum('views')).order_by('date')
-
-        # Conversion en dictionnaire pour un accès facile : {date: vues}
-        stats_map = {stat['date']: stat['total_views'] for stat in daily_stats}
-        
-        # Génération de la liste complète pour le frontend (Recharts)
-        chart_data = []
-        for i in range(30):
-            current_date = start_date + timedelta(days=i)
-            chart_data.append({
-                # Formatage de la date pour le frontend (ex: "24/04")
-                "date": current_date.strftime("%d/%m"),
-                "views": stats_map.get(current_date, 0)
-            })
-
-        # 3. Réponse finale structurée pour correspondre à Dashboard.tsx
-        return Response({
-            "summary": {
-                "total_views": total_views,
-                "today_views": today_views,
-                "active_count": active_count,
-                "avg_rating": avg_rating
-            },
-            "chart_data": chart_data
-        })
+    def perform_create(self, serializer):
+        serializer.save(user=self.request.user)

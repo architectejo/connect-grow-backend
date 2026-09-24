@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from .models import City, Commune, Category, Post
+from .models import City, Commune, Category, Favorite, Post, PostImage
 
 class CommuneSerializer(serializers.ModelSerializer):
     class Meta:
@@ -42,22 +42,33 @@ class SellerSerializer(serializers.ModelSerializer):
         avg = Review.objects.filter(post__seller=obj).aggregate(Avg('rating'))['rating__avg']
         return avg or 0.0
 
+
+class PostImageSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = PostImage
+        fields = ['id', 'image', 'order']
+
+
 class PostSerializer(serializers.ModelSerializer):
     category_name = serializers.ReadOnlyField(source='category.name')
     commune_name = serializers.ReadOnlyField(source='commune.name')
     seller = SellerSerializer(read_only=True)
     seller_name = serializers.ReadOnlyField(source='seller.full_name')
     main_image = serializers.ImageField(required=False, allow_null=True)
+    images = PostImageSerializer(many=True, read_only=True)
     visibility_rank = serializers.SerializerMethodField()
+    is_favorited = serializers.SerializerMethodField()
+    favorites_count = serializers.IntegerField(source='favorited_by.count', read_only=True)
 
     class Meta:
         model = Post
         fields = [
-            'id', 'seller', 'seller_name', 'category', 'category_name', 
-            'commune', 'commune_name', 'post_type', 'title', 'description', 
-            'price', 'condition', 'stock', 'is_price_negotiable', 
-            'main_image', 'views_count', 'likes_count', 'created_at',
-            'visibility_score', 'visibility_rank'
+            'id', 'seller', 'seller_name', 'category', 'category_name',
+            'commune', 'commune_name', 'post_type', 'title', 'description',
+            'price', 'currency', 'condition', 'stock', 'is_price_negotiable',
+            'is_exchangeable', 'main_image', 'images', 'views_count',
+            'likes_count', 'created_at', 'visibility_score', 'visibility_rank',
+            'is_favorited', 'favorites_count',
         ]
         read_only_fields = ['seller', 'views_count', 'likes_count', 'created_at', 'visibility_score']
 
@@ -66,3 +77,23 @@ class PostSerializer(serializers.ModelSerializer):
         if score > 50: return "Elite"
         if score > 10: return "Standard"
         return "Faible"
+
+    def get_is_favorited(self, obj):
+        request = self.context.get('request')
+        if not request or not request.user.is_authenticated:
+            return False
+        # Nécessite d'annoter/prefetch pour éviter le N+1 sur les listes (voir la vue).
+        if hasattr(obj, 'is_favorited_by_user'):
+            return obj.is_favorited_by_user
+        return obj.favorited_by.filter(user=request.user).exists()
+
+
+class FavoriteSerializer(serializers.ModelSerializer):
+    post = PostSerializer(read_only=True)
+    post_id = serializers.PrimaryKeyRelatedField(
+        source='post', queryset=Post.objects.filter(is_delete=False), write_only=True,
+    )
+
+    class Meta:
+        model = Favorite
+        fields = ['id', 'post', 'post_id', 'created_at']
