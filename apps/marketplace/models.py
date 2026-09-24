@@ -93,6 +93,11 @@ class Post(models.Model):
     main_image = models.ImageField(upload_to='posts/')
     views_count = models.PositiveIntegerField(default=0)
     likes_count = models.PositiveIntegerField(default=0) # Pour l'algo Trust & Engage
+    # CDC 3.8 : termes E de l'engagement. Pas encore alimentés (fonctions sociales P2 :
+    # commentaires publics et partage externe), présents dès maintenant pour que la
+    # formule de visibilité soit complète et ne demande pas de migration ultérieure.
+    comments_count = models.PositiveIntegerField(default=0)
+    shares_count = models.PositiveIntegerField(default=0)
     is_active = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
@@ -106,33 +111,68 @@ class Post(models.Model):
         super().save(*args, **kwargs)
 
     def update_visibility_score(self):
+        """CDC 3.8 : visibility_score = E . T . R . (1 + b)
+
+        - E, engagement : 1 + ln(1 + w_v.vues + w_l.likes + w_c.commentaires + w_s.partages)
+        - T, confiance : 0,8 + 0,4 . (TrustScore / 5), borné à [trust_factor_min, trust_factor_max]
+        - R, récence : e^(-λ . âge_heures), avec une demi-vie paramétrable (72 h par défaut)
+        - b, Boost : 0 tant que la billetterie (P3) n'existe pas
+
+        R est calculé au moment de l'appel (aucun traitement de fond n'est requis, CDC 3.8) ;
+        cette méthode elle-même est déclenchée par les signaux d'engagement (vue, like...) et
+        par apps.reputation quand le Trust Score du vendeur change.
+        """
+        import math
+
         from django.utils.timezone import now
-        from apps.interactions.models import Review
-        from django.db.models import Avg
 
-        # 1. Engagement : (views * 0.1) + (likes * 2) + (comments * 5)
-        comments_count = self.reviews.count()
-        engagement = (self.views_count * 0.1) + (self.likes_count * 2) + (comments_count * 5)
+        from apps.ranking.models import RankingSettings
 
-        # 2. Dégradation Temporelle : -10% toutes les 24h (0.9^nb_jours)
-        delta = now() - self.created_at
-        days_passed = delta.total_seconds() / 86400
-        decay = 0.9 ** days_passed
+        settings_row = RankingSettings.get_solo()
 
-        # 3. Multiplicateur de Confiance : (seller_avg_rating / 5) ou 0.7
-        # Note moyenne globale du vendeur (sur toutes ses annonces)
-        avg_rating = Review.objects.filter(post__seller=self.seller).aggregate(Avg('rating'))['rating__avg']
-        
-        multiplier = (avg_rating / 5.0) if avg_rating else 0.7
-        
-        # Calcul final
-        self.visibility_score = float(engagement * decay * multiplier)
+        engagement_raw = (
+            settings_row.weight_views * self.views_count
+            + settings_row.weight_likes * self.likes_count
+            + settings_row.weight_comments * self.comments_count
+            + settings_row.weight_shares * self.shares_count
+        )
+        engagement = 1 + math.log(1 + engagement_raw)
+
+        trust_factor = 0.8 + 0.4 * (self.seller.trust_score / 5.0)
+        trust_factor = max(settings_row.trust_factor_min, min(settings_row.trust_factor_max, trust_factor))
+
+        age_hours = (now() - self.created_at).total_seconds() / 3600
+        decay_rate = math.log(2) / settings_row.recency_half_life_hours
+        recency = math.exp(-decay_rate * age_hours)
+
+        boost = 0  # CDC 7 : le Boost payant arrive en Phase 3.
+
+        self.visibility_score = engagement * trust_factor * recency * (1 + boost)
         self.last_score_update = now()
         self.save(update_fields=['visibility_score', 'last_score_update'])
 
+    def is_trending(self):
+        """CDC 3.8 : badge « Tendance » sur forte hausse d'engagement sur 24 h.
+        Le CDC ne fixe pas de seuil exact ; heuristique documentée ici, à ajuster
+        avec le maître d'ouvrage : au moins 5 vues aujourd'hui, et au moins le
+        double de la moyenne quotidienne des 7 jours précédents."""
+        from datetime import timedelta
+
+        today = timezone.now().date()
+        week_ago = today - timedelta(days=7)
+        previous_stats = list(self.daily_stats.filter(date__gte=week_ago, date__lt=today))
+        if not previous_stats:
+            return False
+
+        avg_previous = sum(s.views for s in previous_stats) / len(previous_stats)
+        today_stat = self.daily_stats.filter(date=today).first()
+        today_views = today_stat.views if today_stat else 0
+
+        return today_views >= 5 and avg_previous > 0 and today_views >= 2 * avg_previous
+
     def __str__(self):
         return f"[{self.post_type}] {self.title}"
-    
+
 class PostViewStat(models.Model):
     post = models.ForeignKey(Post, on_delete=models.CASCADE, related_name='daily_stats')
     # On lie au vendeur pour faciliter les requêtes du Dashboard
@@ -147,6 +187,28 @@ class PostViewStat(models.Model):
 
     def __str__(self):
         return f"{self.post.title} - {self.date} ({self.views} vues)"
+
+
+class PostUniqueView(models.Model):
+    """CDC 3.8 : « une vue unique = une annonce vue par un utilisateur connecté
+    (ou une empreinte anonyme) une fois par jour, garantie par une contrainte
+    d'unicité en base. » viewer_key vaut "user:<id>" ou "anon:<empreinte>" :
+    une seule colonne texte, jamais nulle, pour une contrainte unique portable
+    SQLite/MySQL (2.6) — pas de contrainte d'unicité conditionnelle sur deux
+    colonnes nullables alternatives."""
+
+    post = models.ForeignKey(Post, on_delete=models.CASCADE, related_name='unique_views')
+    viewer_key = models.CharField(max_length=64)
+    date = models.DateField(auto_now_add=True)
+
+    class Meta:
+        unique_together = ('post', 'date', 'viewer_key')
+
+    @staticmethod
+    def build_viewer_key(user, anon_fingerprint):
+        if user is not None and user.is_authenticated:
+            return f"user:{user.id}"
+        return f"anon:{anon_fingerprint}"
 
 
 class PostImage(models.Model):

@@ -7,8 +7,11 @@ from PIL import Image
 from rest_framework import status
 from rest_framework.test import APITestCase
 
+import math
+
 from apps.accounts.models import User
-from .models import Category, City, Commune, Favorite, Post, PostImage
+from apps.ranking.models import RankingSettings
+from .models import Category, City, Commune, Favorite, Post, PostImage, PostUniqueView, PostViewStat
 
 
 def make_test_image(name='photo.jpg', color=(255, 0, 0), fmt='JPEG'):
@@ -197,3 +200,102 @@ class SoftDeleteTests(MarketplaceTestBase):
         post.refresh_from_db()
         self.assertFalse(post.is_delete)
         self.assertIsNone(post.deleted_at)
+
+
+class VisibilityScoreFormulaTests(MarketplaceTestBase):
+    def test_formula_matches_cdc_spec(self):
+        settings_row = RankingSettings.get_solo()
+        post = self.make_post()
+        post.views_count = 10
+        post.likes_count = 2
+        post.comments_count = 1
+        post.shares_count = 0
+        post.save(update_fields=['views_count', 'likes_count', 'comments_count', 'shares_count'])
+
+        post.update_visibility_score()
+        post.refresh_from_db()
+
+        engagement_raw = (
+            settings_row.weight_views * 10 + settings_row.weight_likes * 2 + settings_row.weight_comments * 1
+        )
+        expected_e = 1 + math.log(1 + engagement_raw)
+        expected_t = 0.8 + 0.4 * (self.seller.trust_score / 5.0)
+        age_hours = (post.last_score_update - post.created_at).total_seconds() / 3600
+        expected_r = math.exp(-(math.log(2) / settings_row.recency_half_life_hours) * age_hours)
+        expected = expected_e * expected_t * expected_r
+
+        self.assertAlmostEqual(post.visibility_score, expected, places=6)
+
+    def test_trust_factor_is_bounded(self):
+        settings_row = RankingSettings.get_solo()
+        post = self.make_post()
+        self.seller.trust_score = 0.0
+        self.seller.save(update_fields=['trust_score'])
+        post.update_visibility_score()
+        post.refresh_from_db()
+        # engagement E = 1 (aucune vue/like), donc visibility_score == T borné.
+        self.assertAlmostEqual(post.visibility_score, settings_row.trust_factor_min, places=2)
+
+
+class UniqueViewTests(MarketplaceTestBase):
+    def test_same_anonymous_visitor_counted_once_per_day(self):
+        post = self.make_post()
+        url = reverse('post-detail', args=[post.id])
+
+        self.client.get(url)
+        self.client.get(url)  # même client => même cookie anon_id
+
+        post.refresh_from_db()
+        self.assertEqual(post.views_count, 1)
+        self.assertEqual(PostUniqueView.objects.filter(post=post).count(), 1)
+
+    def test_two_different_users_both_count(self):
+        post = self.make_post()
+        url = reverse('post-detail', args=[post.id])
+
+        self.client.force_authenticate(self.buyer)
+        self.client.get(url)
+
+        other = User.objects.create_user(email='other@example.com', password='x', full_name='Autre')
+        self.client.force_authenticate(other)
+        self.client.get(url)
+
+        post.refresh_from_db()
+        self.assertEqual(post.views_count, 2)
+
+
+class TrendingBadgeTests(MarketplaceTestBase):
+    def test_not_trending_without_history(self):
+        post = self.make_post()
+        self.assertFalse(post.is_trending())
+
+    def test_trending_when_views_spike(self):
+        from datetime import timedelta
+        from django.utils import timezone
+
+        post = self.make_post()
+        today = timezone.now().date()
+        # date est auto_now_add : on force la vraie date après coup avec un
+        # deuxième .save(), qui n'est plus soumis à auto_now_add (seul l'INSERT l'est).
+        for i in range(1, 6):
+            stat = PostViewStat.objects.create(post=post, seller=self.seller, views=1)
+            stat.date = today - timedelta(days=i)
+            stat.save(update_fields=['date'])
+
+        stat = PostViewStat.objects.create(post=post, seller=self.seller, views=10)
+        stat.date = today
+        stat.save(update_fields=['date'])
+
+        self.assertTrue(post.is_trending())
+
+
+class ShareActionTests(MarketplaceTestBase):
+    def test_share_increments_counter_and_requires_auth(self):
+        post = self.make_post()
+        response = self.client.post(reverse('post-share', args=[post.id]))
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+        self.client.force_authenticate(self.buyer)
+        response = self.client.post(reverse('post-share', args=[post.id]))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['shares_count'], 1)

@@ -5,13 +5,18 @@ from .models import Review, ContactRequest, ExchangeProposal, Conversation, Mess
 class ReviewSerializer(serializers.ModelSerializer):
     user_name = serializers.ReadOnlyField(source='user.full_name')
     user_id = serializers.ReadOnlyField(source='user.id')
+    reviewed_user_id = serializers.ReadOnlyField(source='reviewed_user.id')
     is_post_owner = serializers.SerializerMethodField()
+    can_edit = serializers.SerializerMethodField()
+    # post est dérivé du deal côté serveur (voir validate) pour éviter toute
+    # incohérence entre le post fourni par le client et celui de l'affaire.
+    post = serializers.PrimaryKeyRelatedField(read_only=True)
 
     class Meta:
         model = Review
         fields = [
-            'id', 'post', 'user_id', 'user_name', 'content', 'rating', 
-            'reply_content', 'reply_at', 'created_at', 'is_post_owner'
+            'id', 'post', 'deal', 'user_id', 'user_name', 'reviewed_user_id', 'content', 'rating',
+            'reply_content', 'reply_at', 'created_at', 'is_post_owner', 'can_edit',
         ]
         read_only_fields = ['user', 'reply_at']
 
@@ -21,13 +26,54 @@ class ReviewSerializer(serializers.ModelSerializer):
             return obj.post.seller == request.user
         return False
 
+    def get_can_edit(self, obj):
+        request = self.context.get('request')
+        if not request or obj.user_id != getattr(request.user, 'id', None):
+            return False
+        return obj.can_still_be_edited()
+
     def validate(self, data):
-        # Si on est en train de créer (pas d'instance)
+        from apps.reputation.models import Deal
+
+        request = self.context['request']
+        user = request.user
+
         if not self.instance:
-            user = self.context['request'].user
-            post = data.get('post')
-            if post and Review.objects.filter(user=user, post=post).exists():
-                raise serializers.ValidationError("Vous avez déjà laissé un avis sur cette annonce.")
+            deal = data.get('deal')
+            if deal is None:
+                raise serializers.ValidationError(
+                    {"deal": "Un avis n'est possible qu'après une affaire conclue."}
+                )
+            if deal.status != Deal.STATUS_CONFIRMED:
+                raise serializers.ValidationError(
+                    {"deal": "Cette affaire n'a pas encore été confirmée par les deux parties."}
+                )
+            reviewed_user = deal.other_party(user)
+            if reviewed_user is None:
+                raise serializers.ValidationError(
+                    {"deal": "Vous ne faites pas partie de cette affaire."}
+                )
+            if Review.objects.filter(deal=deal, user=user).exists():
+                raise serializers.ValidationError("Vous avez déjà laissé un avis pour cette affaire.")
+
+            # CDC 3.7 : limite de 5 avis donnés par jour et par utilisateur.
+            from django.utils import timezone
+            today_count = Review.objects.filter(
+                user=user, created_at__date=timezone.now().date(),
+            ).count()
+            if today_count >= 5:
+                raise serializers.ValidationError(
+                    "Vous avez atteint la limite de 5 avis par jour."
+                )
+
+            data['post'] = deal.post
+            data['reviewed_user'] = reviewed_user
+        else:
+            if not self.instance.can_still_be_edited():
+                raise serializers.ValidationError("L'avis n'est plus modifiable après 48 heures.")
+            # L'affaire et la personne évaluée ne changent jamais après coup.
+            data.pop('deal', None)
+
         return data
 
 class ContactRequestSerializer(serializers.ModelSerializer):

@@ -81,6 +81,12 @@ class User(AbstractBaseUser, PermissionsMixin):
     is_staff = models.BooleanField(default=False)
     date_joined = models.DateTimeField(auto_now_add=True)
 
+    # CDC 3.7 : Trust Score (moyenne bayésienne), mis en cache ici et recalculé
+    # par un signal (apps.reputation) à chaque avis reçu, plutôt que recalculé à
+    # la volée sur toutes les annonces à chaque affichage.
+    trust_score = models.FloatField(default=3.5)
+    reviews_count = models.PositiveIntegerField(default=0)
+
     objects = UserManager()
 
     USERNAME_FIELD = 'email'

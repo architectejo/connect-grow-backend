@@ -1,9 +1,11 @@
+import uuid
+
 from django.db.models import Exists, F, OuterRef, Q
 from django.utils.timezone import now
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework import status, viewsets, permissions
-from .models import City, Category, Favorite, Post, PostImage, Commune, PostViewStat
+from .models import City, Category, Favorite, Post, PostImage, PostUniqueView, Commune, PostViewStat
 from .serializers import (
     CategorySerializer,
     CitySerializer,
@@ -195,7 +197,17 @@ class PostViewSet(viewsets.ModelViewSet):
             return Response({"error": "Photo introuvable."}, status=status.HTTP_404_NOT_FOUND)
         return Response(status=status.HTTP_204_NO_CONTENT)
 
-    # 6. Favoris (CDC 3.2)
+    # 6. Partage externe (CDC 3.4) : simple compteur, alimente l'engagement (CDC 3.8).
+    @action(detail=True, methods=['post'], permission_classes=[permissions.IsAuthenticated])
+    def share(self, request, pk=None):
+        post = self.get_object()
+        post.shares_count = F('shares_count') + 1
+        post.save(update_fields=['shares_count'])
+        post.refresh_from_db(fields=['shares_count'])
+        post.update_visibility_score()
+        return Response({"shares_count": post.shares_count})
+
+    # 7. Favoris (CDC 3.2)
     @action(detail=True, methods=['post'], permission_classes=[permissions.IsAuthenticated])
     def favorite(self, request, pk=None):
         post = self.get_object()
@@ -208,17 +220,20 @@ class PostViewSet(viewsets.ModelViewSet):
     def retrieve(self, request, *args, **kwargs):
         instance = self.get_object()
 
-        viewed_posts = request.COOKIES.get('viewed_posts', '')
-        viewed_ids = viewed_posts.split(',') if viewed_posts else []
+        # CDC 3.8 : une vue unique par jour et par utilisateur (ou empreinte anonyme),
+        # garantie par une contrainte d'unicité en base plutôt qu'un simple cookie.
+        anon_id = request.COOKIES.get('anon_id') or uuid.uuid4().hex
+        viewer_key = PostUniqueView.build_viewer_key(request.user, anon_id)
 
-        if str(instance.id) not in viewed_ids:
-            # Mise à jour du compteur global
+        _, is_new_view = PostUniqueView.objects.get_or_create(
+            post=instance, date=now().date(), viewer_key=viewer_key,
+        )
+
+        if is_new_view:
             instance.views_count += 1
-            # Mise à jour du score de visibilité
             instance.update_visibility_score()
             instance.save(update_fields=['views_count', 'visibility_score', 'last_score_update'])
 
-            # Mise à jour des stats journalières
             stat, created = PostViewStat.objects.get_or_create(
                 post=instance,
                 seller=instance.seller,
@@ -228,22 +243,17 @@ class PostViewSet(viewsets.ModelViewSet):
             stat.views = F('views') + 1
             stat.save()
 
-            viewed_ids.append(str(instance.id))
-
-        # IMPORTANT : On recharge l'instance si on a utilisé F() ou modifié des champs
-        # pour que le serializer ait les bonnes données numériques
         serializer = self.get_serializer(instance)
         response = Response(serializer.data)
 
-        new_viewed_str = ','.join(viewed_ids)
-        response.set_cookie(
-            'viewed_posts',
-            new_viewed_str,
-            max_age=86400,
-            httponly=True,
-            samesite='Lax',
-            secure=False
-        )
+        if not request.COOKIES.get('anon_id'):
+            response.set_cookie(
+                'anon_id', anon_id,
+                max_age=365 * 86400,
+                httponly=True,
+                samesite='Lax',
+                secure=False,
+            )
 
         return response
 

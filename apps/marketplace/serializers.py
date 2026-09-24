@@ -29,18 +29,35 @@ class BusinessProfileSerializer(serializers.ModelSerializer):
 
 class SellerSerializer(serializers.ModelSerializer):
     business_profile = BusinessProfileSerializer(read_only=True)
-    avg_rating = serializers.SerializerMethodField()
+    trust_score = serializers.SerializerMethodField()
+    reviews_count = serializers.IntegerField(read_only=True)
+    is_new_seller = serializers.SerializerMethodField()
+    is_trusted_seller = serializers.SerializerMethodField()
 
     class Meta:
         from apps.accounts.models import User
         model = User
-        fields = ['id', 'full_name', 'photo', 'phone', 'user_type', 'business_profile', 'date_joined', 'avg_rating']
+        fields = [
+            'id', 'full_name', 'photo', 'phone', 'user_type', 'business_profile', 'date_joined',
+            'trust_score', 'reviews_count', 'is_new_seller', 'is_trusted_seller',
+        ]
 
-    def get_avg_rating(self, obj):
-        from apps.interactions.models import Review
-        from django.db.models import Avg
-        avg = Review.objects.filter(post__seller=obj).aggregate(Avg('rating'))['rating__avg']
-        return avg or 0.0
+    def _min_reviews_to_display(self):
+        from apps.reputation.models import TrustScoreSettings
+        return TrustScoreSettings.get_solo().min_reviews_to_display
+
+    def get_is_new_seller(self, obj):
+        # CDC 3.7 : le score n'est affiché publiquement qu'à partir de 3 avis.
+        return obj.reviews_count < self._min_reviews_to_display()
+
+    def get_trust_score(self, obj):
+        if self.get_is_new_seller(obj):
+            return None
+        return obj.trust_score
+
+    def get_is_trusted_seller(self, obj):
+        # CDC 3.8 : badge « Vendeur fiable » (Trust Score >= 4.5, au moins 10 avis).
+        return obj.trust_score >= 4.5 and obj.reviews_count >= 10
 
 
 class PostImageSerializer(serializers.ModelSerializer):
@@ -59,6 +76,9 @@ class PostSerializer(serializers.ModelSerializer):
     visibility_rank = serializers.SerializerMethodField()
     is_favorited = serializers.SerializerMethodField()
     favorites_count = serializers.IntegerField(source='favorited_by.count', read_only=True)
+    is_trending = serializers.SerializerMethodField()
+    # CDC 3.8 : le Boost (billing, P3) n'existe pas encore ; toujours False pour l'instant.
+    is_sponsored = serializers.SerializerMethodField()
 
     class Meta:
         model = Post
@@ -67,16 +87,26 @@ class PostSerializer(serializers.ModelSerializer):
             'commune', 'commune_name', 'post_type', 'title', 'description',
             'price', 'currency', 'condition', 'stock', 'is_price_negotiable',
             'is_exchangeable', 'main_image', 'images', 'views_count',
-            'likes_count', 'created_at', 'visibility_score', 'visibility_rank',
-            'is_favorited', 'favorites_count',
+            'likes_count', 'comments_count', 'shares_count', 'created_at',
+            'visibility_score', 'visibility_rank', 'is_favorited', 'favorites_count',
+            'is_trending', 'is_sponsored',
         ]
-        read_only_fields = ['seller', 'views_count', 'likes_count', 'created_at', 'visibility_score']
+        read_only_fields = [
+            'seller', 'views_count', 'likes_count', 'comments_count', 'shares_count',
+            'created_at', 'visibility_score',
+        ]
 
     def get_visibility_rank(self, obj):
         score = obj.visibility_score or 0.0
         if score > 50: return "Elite"
         if score > 10: return "Standard"
         return "Faible"
+
+    def get_is_trending(self, obj):
+        return obj.is_trending()
+
+    def get_is_sponsored(self, obj):
+        return False
 
     def get_is_favorited(self, obj):
         request = self.context.get('request')

@@ -45,6 +45,8 @@ INSTALLED_APPS = [
     'apps.marketplace',
     'apps.payments',
     'apps.interactions',
+    'apps.reputation',
+    'apps.ranking',
 ]
 
 MIDDLEWARE = [

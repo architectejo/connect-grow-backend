@@ -19,18 +19,21 @@ class ReviewViewSet(viewsets.ModelViewSet):
 
     def perform_create(self, serializer):
         review = serializer.save(user=self.request.user)
-        # Notification pour le vendeur
-        if review.post.seller != self.request.user:
-            Notification.objects.create(
-                user=review.post.seller,
-                notification_type='COMMENT',
-                title=f"Nouvel avis sur {review.post.title}",
-                content=f"{self.request.user.full_name} a laissé un avis : {review.content[:50]}...",
-                link=f"/post/{review.post.id}"
-            )
+        Notification.objects.create(
+            user=review.reviewed_user,
+            notification_type='COMMENT',
+            title=f"Nouvel avis sur {review.post.title}",
+            content=f"{self.request.user.full_name} a laissé un avis : {review.content[:50]}...",
+            link=f"/post/{review.post.id}"
+        )
 
     def get_queryset(self):
         queryset = Review.objects.all()
+        # CDC 3.7 : un avis retiré par la modération n'est plus affiché dans les
+        # listes publiques (mais reste consultable par son auteur ou un admin,
+        # p. ex. pour voir/gérer son propre avis masqué).
+        if self.action == 'list' and not (self.request.user.is_authenticated and self.request.user.is_staff):
+            queryset = queryset.filter(is_hidden=False)
         post_id = self.request.query_params.get('post')
         if post_id:
             queryset = queryset.filter(post_id=post_id)
@@ -53,8 +56,11 @@ class ReviewViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['post'])
     def reply(self, request, pk=None):
         review = self.get_object()
-        if review.post.seller != request.user:
-            return Response({"error": "Seul le vendeur peut répondre à cet avis."}, status=status.HTTP_403_FORBIDDEN)
+        if review.reviewed_user_id != request.user.id:
+            return Response(
+                {"error": "Seule la personne évaluée peut répondre à cet avis."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
         
         reply_content = request.data.get('reply_content')
         if not reply_content:
