@@ -10,6 +10,7 @@ urlpatterns = [
     path('api/payments/', include('apps.payments.urls')),
     path('api/interactions/', include('apps.interactions.urls')),
     path('api/reputation/', include('apps.reputation.urls')),
+    path('api/moderation/', include('apps.moderation.urls')),
 ]
 
 # Une seule fois suffit, et seulement si DEBUG est True

@@ -179,6 +179,16 @@ class KycDocumentApiTests(APITestCase):
         doc.refresh_from_db()
         self.assertEqual(doc.status, KycDocument.STATUS_VALIDE)
 
+    def test_kyc_decision_writes_an_audit_log(self):
+        from apps.moderation.models import AuditLog
+
+        doc = KycDocument.objects.create(
+            business_profile=self.business_profile, document_type=KycDocument.DOC_RCCM,
+        )
+        self.client.force_authenticate(self.admin)
+        self.client.post(reverse('kyc_decision', args=[doc.pk]), {'decision': KycDocument.STATUS_VALIDE})
+        self.assertTrue(AuditLog.objects.filter(action='KYC_VALIDE', actor=self.admin).exists())
+
     def test_non_admin_cannot_access_review_queue(self):
         self.client.force_authenticate(self.business_user)
         response = self.client.get(reverse('kyc_review_queue'))

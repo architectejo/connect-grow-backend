@@ -144,3 +144,65 @@ class TrustScoreSignalTests(ReputationTestBase):
         )
         self.post.refresh_from_db()
         self.assertNotEqual(before, self.post.visibility_score)
+
+
+class CrossedReviewsDetectionTests(ReputationTestBase):
+    def make_post(self, seller):
+        return Post.objects.create(
+            seller=seller, category=self.category, commune=self.commune,
+            title='Une annonce quelconque à vendre', description='Description suffisamment longue pour le CDC.',
+            price=50, main_image=make_test_image(),
+        )
+
+    def make_confirmed_deal(self, initiator, counterparty, post):
+        deal = Deal.objects.create(post=post, initiator=initiator, counterparty=counterparty)
+        deal.confirm()
+        return deal
+
+    def test_three_mutual_deals_trigger_a_report(self):
+        from django.contrib.contenttypes.models import ContentType
+
+        from apps.moderation.models import Report
+
+        for _ in range(3):
+            post = self.make_post(self.seller)
+            deal = self.make_confirmed_deal(self.buyer, self.seller, post=post)
+            Review.objects.create(
+                deal=deal, post=post, user=self.buyer, reviewed_user=self.seller,
+                content='Vendeur très sérieux et rapide.', rating=5,
+            )
+            last_review = Review.objects.create(
+                deal=deal, post=post, user=self.seller, reviewed_user=self.buyer,
+                content='Acheteur sérieux et ponctuel.', rating=5,
+            )
+
+        self.assertTrue(
+            Report.objects.filter(
+                content_type=ContentType.objects.get_for_model(Review),
+                object_id=last_review.id,
+                reason=Report.REASON_AVIS_CROISES,
+            ).exists()
+        )
+
+    def test_two_mutual_deals_do_not_trigger_a_report(self):
+        from django.contrib.contenttypes.models import ContentType
+
+        from apps.moderation.models import Report
+
+        for _ in range(2):
+            post = self.make_post(self.seller)
+            deal = self.make_confirmed_deal(self.buyer, self.seller, post=post)
+            Review.objects.create(
+                deal=deal, post=post, user=self.buyer, reviewed_user=self.seller,
+                content='Vendeur très sérieux et rapide.', rating=5,
+            )
+            Review.objects.create(
+                deal=deal, post=post, user=self.seller, reviewed_user=self.buyer,
+                content='Acheteur sérieux et ponctuel.', rating=5,
+            )
+
+        self.assertFalse(
+            Report.objects.filter(
+                content_type=ContentType.objects.get_for_model(Review), reason=Report.REASON_AVIS_CROISES,
+            ).exists()
+        )

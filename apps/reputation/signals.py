@@ -38,9 +38,53 @@ def _handle_review_change(instance):
         recompute_trust_score(instance.reviewed_user)
 
 
+def check_crossed_reviews(review):
+    """CDC 3.7 (anti-abus) : détecte les avis croisés répétés entre les deux
+    mêmes comptes et les envoie en modération plutôt que de les bloquer —
+    un faux positif ne doit pas empêcher un vrai avis d'exister."""
+    from datetime import timedelta
+
+    from django.contrib.contenttypes.models import ContentType
+    from django.db.models import Q
+    from django.utils import timezone
+
+    from apps.moderation.models import Report
+
+    user_a, user_b = review.user_id, review.reviewed_user_id
+    if not user_a or not user_b:
+        return
+
+    thirty_days_ago = timezone.now() - timedelta(days=30)
+    deal_ids = set(
+        Review.objects.filter(
+            Q(user_id=user_a, reviewed_user_id=user_b) | Q(user_id=user_b, reviewed_user_id=user_a),
+            created_at__gte=thirty_days_ago,
+        ).values_list('deal_id', flat=True)
+    )
+
+    if len(deal_ids) >= 3:
+        content_type = ContentType.objects.get_for_model(Review)
+        already_reported = Report.objects.filter(
+            content_type=content_type, object_id=review.id, reason=Report.REASON_AVIS_CROISES,
+        ).exists()
+        if not already_reported:
+            Report.objects.create(
+                content_type=content_type,
+                object_id=review.id,
+                reporter=None,
+                reason=Report.REASON_AVIS_CROISES,
+                description=(
+                    f"Avis croisés répétés détectés entre les utilisateurs {user_a} et {user_b} "
+                    f"({len(deal_ids)} affaires distinctes sur 30 jours)."
+                ),
+            )
+
+
 @receiver(post_save, sender=Review)
-def on_review_saved(sender, instance, **kwargs):
+def on_review_saved(sender, instance, created, **kwargs):
     _handle_review_change(instance)
+    if created:
+        check_crossed_reviews(instance)
 
 
 @receiver(post_delete, sender=Review)

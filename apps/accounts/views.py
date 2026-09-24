@@ -198,6 +198,12 @@ class KycDecisionView(APIView):
                 doc.business_profile.is_verified = True
                 doc.business_profile.save(update_fields=['is_verified'])
 
+        from apps.moderation.models import AuditLog
+        AuditLog.record(
+            request.user, f'KYC_{decision}', target=doc,
+            details=doc.rejection_reason or f"Document {doc.get_document_type_display()} validé.",
+        )
+
         return Response(KycDocumentSerializer(doc).data, status=status.HTTP_200_OK)
 
 

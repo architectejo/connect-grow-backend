@@ -47,6 +47,7 @@ INSTALLED_APPS = [
     'apps.interactions',
     'apps.reputation',
     'apps.ranking',
+    'apps.moderation',
 ]
 
 MIDDLEWARE = [
