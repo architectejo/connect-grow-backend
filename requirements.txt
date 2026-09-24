@@ -1,0 +1,23 @@
+# --- Framework et API ---
+Django==4.2
+djangorestframework==3.16.1
+djangorestframework_simplejwt==5.5.1
+django-cors-headers==4.9.0
+
+# --- Temps réel (Channels / ASGI) ---
+daphne==4.2.1
+channels==4.3.2
+channels_redis==4.3.0
+
+# --- Base de données ---
+# Pilote MySQL pour la recette et la production (CDC 5.1).
+# Nécessite les paquets système build-essential + default-libmysqlclient-dev / pkg-config
+# (voir Dockerfile). En repli si la compilation échoue sur un poste dev : PyMySQL.
+mysqlclient==2.2.4
+# PyMySQL==1.1.1
+
+# --- Médias ---
+Pillow==12.1.1
+
+# --- Configuration ---
+python-dotenv==1.2.2
