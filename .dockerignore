@@ -6,3 +6,5 @@ media/
 staticfiles/
 scratch/
 .git/
+
+private_media/

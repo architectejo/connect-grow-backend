@@ -1,0 +1,39 @@
+# Variante pour tester en local la parité MySQL de la recette/CI (CDC 2.5, 2.6).
+# Usage : docker compose -f docker-compose.yml -f docker-compose.mysql.yml up --build
+services:
+  db:
+    image: mysql:8.0
+    environment:
+      MYSQL_DATABASE: connecteplus
+      MYSQL_USER: connecteplus
+      MYSQL_PASSWORD: connecteplus
+      MYSQL_ROOT_PASSWORD: root
+    volumes:
+      - db_data:/var/lib/mysql
+      - ./mysql-init:/docker-entrypoint-initdb.d:ro
+    ports:
+      - "3306:3306"
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-proot"]
+      interval: 5s
+      timeout: 5s
+      retries: 60
+      start_period: 60s
+
+  backend:
+    environment:
+      REDIS_HOST: redis
+      DB_ENGINE: mysql
+      DB_NAME: connecteplus
+      DB_USER: connecteplus
+      DB_PASSWORD: connecteplus
+      DB_HOST: db
+      DB_PORT: "3306"
+    depends_on:
+      redis:
+        condition: service_started
+      db:
+        condition: service_healthy
+
+volumes:
+  db_data:

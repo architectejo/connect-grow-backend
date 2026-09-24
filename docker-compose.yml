@@ -1,0 +1,26 @@
+# Environnement de développement conteneurisé (CDC 4.7, 2.5) : base SQLite,
+# comme sur le poste de chaque développeur. Pour la parité MySQL de recette/CI,
+# voir docker-compose.mysql.yml.
+services:
+  redis:
+    image: redis:7-alpine
+    # Pas de port publié sur l'hôte : seul le service backend a besoin de le joindre,
+    # via le réseau Docker interne (nom de service "redis"). Évite les conflits avec
+    # un Redis déjà lancé sur la machine de dev.
+
+  backend:
+    build: .
+    env_file:
+      - ./.env
+    environment:
+      REDIS_HOST: redis
+    volumes:
+      - .:/app
+      - backend_media:/app/media
+    ports:
+      - "8000:8000"
+    depends_on:
+      - redis
+
+volumes:
+  backend_media:

@@ -91,7 +91,9 @@ REST_FRAMEWORK = {
     ],
     'DEFAULT_THROTTLE_RATES': {
         'anon': '100/day',
-        'user': '1000/day'
+        'user': '1000/day',
+        # CDC 4.2 : limitation du débit sur l'OTP (coût SMS, anti-brute-force).
+        'otp': '5/hour',
     }
 }
 
@@ -191,5 +193,10 @@ STATIC_URL = 'static/'
 STATIC_ROOT = BASE_DIR / 'staticfiles'
 MEDIA_URL = '/media/'
 MEDIA_ROOT = os.path.join(BASE_DIR, 'media')
+
+# CDC 4.2 / 5.8 : pièces KYC dans un espace privé, jamais sous MEDIA_ROOT (qui est
+# servi publiquement par Nginx/le helper static() en dev). Accès uniquement via une
+# vue authentifiée réservée aux administrateurs (apps.accounts).
+KYC_PRIVATE_ROOT = BASE_DIR / 'private_media' / 'kyc'
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'

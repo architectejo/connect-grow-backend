@@ -10,3 +10,6 @@ scratch/
 # --- Divers ---
 .DS_Store
 Thumbs.db
+
+# KYC (fichiers privés, jamais commit)
+private_media/
