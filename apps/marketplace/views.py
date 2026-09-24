@@ -1,6 +1,7 @@
 import uuid
 
 from django.db.models import Exists, F, OuterRef, Q
+from django.shortcuts import get_object_or_404
 from django.utils.timezone import now
 from rest_framework.decorators import action
 from rest_framework.response import Response
@@ -164,6 +165,46 @@ class PostViewSet(viewsets.ModelViewSet):
         post = Post.objects.get(pk=pk, seller=request.user)
         post.delete()
         return Response({"message": "Annonce supprimée définitivement"})
+
+    # Cycle de vie (CDC 3.2, 3.9) : pause, reprise, vente, renouvellement.
+    # Ces actions portent aussi sur des annonces inactives (en pause, expirées),
+    # donc hors du queryset public par défaut : lookup direct, comme restore/hard_delete.
+    @action(detail=True, methods=['post'], permission_classes=[permissions.IsAuthenticated])
+    def pause(self, request, pk=None):
+        post = get_object_or_404(Post, pk=pk)
+        if post.seller != request.user:
+            return Response({"error": "Action non autorisée"}, status=status.HTTP_403_FORBIDDEN)
+        post.pause()
+        return Response(self.get_serializer(post).data)
+
+    @action(detail=True, methods=['post'], permission_classes=[permissions.IsAuthenticated])
+    def unpause(self, request, pk=None):
+        post = get_object_or_404(Post, pk=pk)
+        if post.seller != request.user:
+            return Response({"error": "Action non autorisée"}, status=status.HTTP_403_FORBIDDEN)
+        resumed = post.unpause()
+        if not resumed:
+            return Response(
+                {"error": "Cette annonce a expiré. Renouvelez-la plutôt.", "status": post.status},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        return Response(self.get_serializer(post).data)
+
+    @action(detail=True, methods=['post'], permission_classes=[permissions.IsAuthenticated])
+    def mark_sold(self, request, pk=None):
+        post = get_object_or_404(Post, pk=pk)
+        if post.seller != request.user:
+            return Response({"error": "Action non autorisée"}, status=status.HTTP_403_FORBIDDEN)
+        post.mark_sold()
+        return Response(self.get_serializer(post).data)
+
+    @action(detail=True, methods=['post'], permission_classes=[permissions.IsAuthenticated])
+    def renew(self, request, pk=None):
+        post = get_object_or_404(Post, pk=pk)
+        if post.seller != request.user:
+            return Response({"error": "Action non autorisée"}, status=status.HTTP_403_FORBIDDEN)
+        post.renew()
+        return Response(self.get_serializer(post).data)
 
     # 5. Galerie de photos (CDC 3.2 : 1 à 8 photos par annonce, main_image comprise)
     @action(detail=True, methods=['post'], permission_classes=[permissions.IsAuthenticated])

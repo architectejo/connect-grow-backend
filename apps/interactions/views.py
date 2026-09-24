@@ -72,12 +72,13 @@ class ReviewViewSet(viewsets.ModelViewSet):
         review.save()
 
         # Notification pour l'auteur de l'avis
+        post_title = review.post.title if review.post else "une annonce supprimée"
         Notification.objects.create(
             user=review.user,
             notification_type='SYSTEM',
             title=f"Réponse à votre avis",
-            content=f"{request.user.full_name} a répondu à votre avis sur {review.post.title}",
-            link=f"/post/{review.post.id}"
+            content=f"{request.user.full_name} a répondu à votre avis sur {post_title}",
+            link=f"/post/{review.post_id}" if review.post_id else "",
         )
 
         serializer = self.get_serializer(review)

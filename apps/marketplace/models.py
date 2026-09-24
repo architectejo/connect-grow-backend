@@ -1,4 +1,6 @@
 # apps/marketplace/models.py
+from datetime import timedelta
+
 from django.core.validators import MaxLengthValidator, MinLengthValidator
 from django.db import models
 from django.conf import settings
@@ -40,6 +42,27 @@ class Category(models.Model):
         verbose_name = "Catégorie"
 
 
+class MarketplaceSettings(models.Model):
+    """CDC 3.2 : durée d'expiration d'une annonce sans renouvellement,
+    « valeur paramétrable » dans le back-office. Ligne singleton (pk=1)."""
+
+    expiration_days = models.PositiveIntegerField(default=60)
+    trash_retention_days = models.PositiveIntegerField(default=30)
+    expiring_soon_warning_days = models.PositiveIntegerField(default=3)
+
+    class Meta:
+        verbose_name = "Paramètres de la marketplace"
+        verbose_name_plural = "Paramètres de la marketplace"
+
+    def __str__(self):
+        return "Paramètres de la marketplace"
+
+    @classmethod
+    def get_solo(cls):
+        obj, _ = cls.objects.get_or_create(pk=1)
+        return obj
+
+
 class Post(models.Model):
     POST_TYPE_CHOICES = (
         ('PRODUIT', 'Produit Physique'),
@@ -55,6 +78,21 @@ class Post(models.Model):
     CURRENCY_CHOICES = (
         ('USD', 'USD'),
         ('CDF', 'CDF'),
+    )
+
+    # CDC 3.2 : cycle de vie. is_active (déjà existant) reste le seul indicateur de
+    # visibilité effective sur la marketplace (annonce masquée par le vendeur, par
+    # expiration ou par la modération) ; status ne fait qu'expliquer POURQUOI, côté
+    # tableau de bord vendeur, sans changer la logique des filtres déjà en place.
+    STATUS_ACTIVE = 'ACTIVE'
+    STATUS_PAUSED = 'PAUSED'
+    STATUS_SOLD = 'SOLD'
+    STATUS_EXPIRED = 'EXPIRED'
+    STATUS_CHOICES = (
+        (STATUS_ACTIVE, "Active"),
+        (STATUS_PAUSED, "En pause"),
+        (STATUS_SOLD, "Vendue"),
+        (STATUS_EXPIRED, "Expirée"),
     )
 
     seller = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='posts')
@@ -101,6 +139,13 @@ class Post(models.Model):
     is_active = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
+    status = models.CharField(max_length=10, choices=STATUS_CHOICES, default=STATUS_ACTIVE)
+    # CDC 3.2 : expiration après 60 jours sans renouvellement (valeur paramétrable,
+    # cf. MarketplaceSettings). Calculé à la création et à chaque renouvellement.
+    expires_at = models.DateTimeField(null=True, blank=True)
+    # Évite de renotifier chaque jour la même échéance (CDC 3.6 : « Annonce bientôt expirée »).
+    expiring_soon_notified = models.BooleanField(default=False)
+
     # Algorithme Trust & Engage
     visibility_score = models.FloatField(default=0.0)
     last_score_update = models.DateTimeField(null=True, blank=True)
@@ -108,7 +153,38 @@ class Post(models.Model):
     def save(self, *args, **kwargs):
         if self.main_image:
             self.main_image = convert_to_webp(self.main_image)
+        if self.expires_at is None:
+            expiration_days = MarketplaceSettings.get_solo().expiration_days
+            self.expires_at = timezone.now() + timedelta(days=expiration_days)
         super().save(*args, **kwargs)
+
+    def renew(self):
+        expiration_days = MarketplaceSettings.get_solo().expiration_days
+        self.status = self.STATUS_ACTIVE
+        self.is_active = True
+        self.expires_at = timezone.now() + timedelta(days=expiration_days)
+        self.expiring_soon_notified = False
+        self.save(update_fields=['status', 'is_active', 'expires_at', 'expiring_soon_notified'])
+
+    def mark_sold(self):
+        self.status = self.STATUS_SOLD
+        self.is_active = False
+        self.save(update_fields=['status', 'is_active'])
+
+    def pause(self):
+        self.status = self.STATUS_PAUSED
+        self.is_active = False
+        self.save(update_fields=['status', 'is_active'])
+
+    def unpause(self):
+        if self.expires_at and self.expires_at < timezone.now():
+            self.status = self.STATUS_EXPIRED
+            self.save(update_fields=['status'])
+            return False
+        self.status = self.STATUS_ACTIVE
+        self.is_active = True
+        self.save(update_fields=['status', 'is_active'])
+        return True
 
     def update_visibility_score(self):
         """CDC 3.8 : visibility_score = E . T . R . (1 + b)
@@ -156,8 +232,6 @@ class Post(models.Model):
         Le CDC ne fixe pas de seuil exact ; heuristique documentée ici, à ajuster
         avec le maître d'ouvrage : au moins 5 vues aujourd'hui, et au moins le
         double de la moyenne quotidienne des 7 jours précédents."""
-        from datetime import timedelta
-
         today = timezone.now().date()
         week_ago = today - timedelta(days=7)
         previous_stats = list(self.daily_stats.filter(date__gte=week_ago, date__lt=today))

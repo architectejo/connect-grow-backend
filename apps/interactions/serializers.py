@@ -22,7 +22,7 @@ class ReviewSerializer(serializers.ModelSerializer):
 
     def get_is_post_owner(self, obj):
         request = self.context.get('request')
-        if request and request.user:
+        if request and request.user and obj.post:
             return obj.post.seller == request.user
         return False
 

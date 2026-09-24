@@ -38,7 +38,11 @@ class Deal(models.Model):
         (STATUS_DECLINED, "Refusée"),
     )
 
-    post = models.ForeignKey('marketplace.Post', on_delete=models.CASCADE, related_name='deals')
+    # CDC 3.10 : si l'annonce est purgée, l'affaire (et donc les avis qui en
+    # dépendent via Review.deal) doit survivre — SET_NULL, pas CASCADE.
+    post = models.ForeignKey(
+        'marketplace.Post', on_delete=models.SET_NULL, null=True, blank=True, related_name='deals',
+    )
     initiator = models.ForeignKey(
         settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='deals_initiated',
     )
@@ -69,4 +73,5 @@ class Deal(models.Model):
         self.save(update_fields=['status'])
 
     def __str__(self):
-        return f"Affaire {self.post.title} ({self.get_status_display()})"
+        post_title = self.post.title if self.post else 'annonce supprimée'
+        return f"Affaire {post_title} ({self.get_status_display()})"

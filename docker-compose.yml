@@ -22,5 +22,21 @@ services:
     depends_on:
       - redis
 
+  # CDC 5.2, 5.6 : « Tâches cron » — mêmes image et code que backend, même base
+  # de données, mais un processus cron dédié plutôt qu'une tâche de fond dans
+  # le serveur applicatif (qui doit rester utilisable même si le cron est coupé).
+  cron:
+    build: .
+    entrypoint: ["/app/docker-entrypoint-cron.sh"]
+    env_file:
+      - ./.env
+    environment:
+      REDIS_HOST: redis
+    volumes:
+      - .:/app
+      - backend_media:/app/media
+    depends_on:
+      - redis
+
 volumes:
   backend_media:

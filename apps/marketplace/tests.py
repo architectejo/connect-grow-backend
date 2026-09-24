@@ -299,3 +299,137 @@ class ShareActionTests(MarketplaceTestBase):
         response = self.client.post(reverse('post-share', args=[post.id]))
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data['shares_count'], 1)
+
+
+class PostLifecycleActionTests(MarketplaceTestBase):
+    def test_owner_can_pause_and_unpause(self):
+        post = self.make_post()
+        self.client.force_authenticate(self.seller)
+
+        response = self.client.post(reverse('post-pause', args=[post.id]))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        post.refresh_from_db()
+        self.assertEqual(post.status, Post.STATUS_PAUSED)
+        self.assertFalse(post.is_active)
+
+        response = self.client.post(reverse('post-unpause', args=[post.id]))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        post.refresh_from_db()
+        self.assertEqual(post.status, Post.STATUS_ACTIVE)
+        self.assertTrue(post.is_active)
+
+    def test_non_owner_cannot_pause(self):
+        post = self.make_post()
+        self.client.force_authenticate(self.buyer)
+        response = self.client.post(reverse('post-pause', args=[post.id]))
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_mark_sold(self):
+        post = self.make_post()
+        self.client.force_authenticate(self.seller)
+        response = self.client.post(reverse('post-mark-sold', args=[post.id]))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        post.refresh_from_db()
+        self.assertEqual(post.status, Post.STATUS_SOLD)
+        self.assertFalse(post.is_active)
+
+    def test_unpause_an_expired_post_requires_renewal(self):
+        from django.utils import timezone
+
+        post = self.make_post()
+        Post.objects.filter(pk=post.pk).update(status=Post.STATUS_PAUSED, expires_at=timezone.now() - timezone.timedelta(days=1))
+        self.client.force_authenticate(self.seller)
+        response = self.client.post(reverse('post-unpause', args=[post.id]))
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        post.refresh_from_db()
+        self.assertEqual(post.status, Post.STATUS_EXPIRED)
+
+    def test_renew_resets_expiration_and_reactivates(self):
+        from django.utils import timezone
+
+        post = self.make_post()
+        Post.objects.filter(pk=post.pk).update(status=Post.STATUS_EXPIRED, is_active=False, expires_at=timezone.now() - timezone.timedelta(days=1))
+        self.client.force_authenticate(self.seller)
+        response = self.client.post(reverse('post-renew', args=[post.id]))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        post.refresh_from_db()
+        self.assertEqual(post.status, Post.STATUS_ACTIVE)
+        self.assertTrue(post.is_active)
+        self.assertGreater(post.expires_at, timezone.now())
+
+
+class ScheduledTasksTests(MarketplaceTestBase):
+    def test_purge_trash_deletes_only_old_soft_deleted_posts(self):
+        from datetime import timedelta
+
+        from django.core.management import call_command
+        from django.utils import timezone
+
+        old_deleted = self.make_post(title='Une annonce ancienne à purger')
+        Post.objects.filter(pk=old_deleted.pk).update(
+            is_delete=True, deleted_at=timezone.now() - timedelta(days=31),
+        )
+        recent_deleted = self.make_post(title='Une annonce récente supprimée')
+        Post.objects.filter(pk=recent_deleted.pk).update(
+            is_delete=True, deleted_at=timezone.now() - timedelta(days=1),
+        )
+
+        call_command('purge_trash', verbosity=0)
+
+        self.assertFalse(Post.objects.filter(pk=old_deleted.pk).exists())
+        self.assertTrue(Post.objects.filter(pk=recent_deleted.pk).exists())
+
+    def test_purge_trash_preserves_reviews_and_deals(self):
+        from datetime import timedelta
+
+        from django.core.management import call_command
+        from django.utils import timezone
+
+        from apps.reputation.models import Deal
+        from apps.interactions.models import Review
+
+        post = self.make_post()
+        deal = Deal.objects.create(post=post, initiator=self.buyer, counterparty=self.seller)
+        deal.confirm()
+        review = Review.objects.create(
+            deal=deal, post=post, user=self.buyer, reviewed_user=self.seller,
+            content='Vendeur très sérieux et rapide.', rating=5,
+        )
+        Post.objects.filter(pk=post.pk).update(is_delete=True, deleted_at=timezone.now() - timedelta(days=31))
+
+        call_command('purge_trash', verbosity=0)
+
+        self.assertFalse(Post.objects.filter(pk=post.pk).exists())
+        review.refresh_from_db()
+        deal.refresh_from_db()
+        self.assertIsNone(review.post)
+        self.assertIsNone(deal.post)
+
+    def test_expire_posts_transitions_status(self):
+        from django.core.management import call_command
+        from django.utils import timezone
+
+        post = self.make_post()
+        Post.objects.filter(pk=post.pk).update(expires_at=timezone.now() - timezone.timedelta(days=1))
+
+        call_command('expire_posts', verbosity=0)
+
+        post.refresh_from_db()
+        self.assertEqual(post.status, Post.STATUS_EXPIRED)
+        self.assertFalse(post.is_active)
+
+    def test_expire_posts_notifies_upcoming_expiration_once(self):
+        from django.core.management import call_command
+        from django.utils import timezone
+
+        from apps.interactions.models import Notification
+
+        post = self.make_post()
+        Post.objects.filter(pk=post.pk).update(expires_at=timezone.now() + timezone.timedelta(days=1))
+
+        call_command('expire_posts', verbosity=0)
+        call_command('expire_posts', verbosity=0)  # ne doit pas renotifier
+
+        self.assertEqual(
+            Notification.objects.filter(user=self.seller, notification_type='EXPIRATION').count(), 1,
+        )

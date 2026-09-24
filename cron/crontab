@@ -1,0 +1,10 @@
+# CDC 5.6 : tâches planifiées. cron n'hérite pas de l'environnement du
+# conteneur : docker-entrypoint-cron.sh le fige dans /etc/environment, que
+# chaque ligne recharge avant d'invoquer manage.py.
+SHELL=/bin/sh
+
+0 2 * * * . /etc/environment; cd /app && python manage.py purge_trash >> /proc/1/fd/1 2>> /proc/1/fd/2
+5 2 * * * . /etc/environment; cd /app && python manage.py expire_posts >> /proc/1/fd/1 2>> /proc/1/fd/2
+10 2 * * * . /etc/environment; cd /app && python manage.py lift_expired_sanctions >> /proc/1/fd/1 2>> /proc/1/fd/2
+0 * * * * . /etc/environment; cd /app && python manage.py cleanup_otp_codes >> /proc/1/fd/1 2>> /proc/1/fd/2
+5 * * * * . /etc/environment; cd /app && python manage.py refresh_dashboard_aggregates >> /proc/1/fd/1 2>> /proc/1/fd/2

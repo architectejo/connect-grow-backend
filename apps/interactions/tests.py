@@ -185,3 +185,19 @@ class ReviewReplyTests(ReviewTestBase):
             'reply_content': 'Je réponds à mon propre avis.',
         })
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+
+class ContactAggregateCommandTests(ReviewTestBase):
+    def test_refresh_dashboard_aggregates_counts_todays_contacts(self):
+        from django.core.management import call_command
+
+        from .models import ContactRequest, ContactStat
+
+        ContactRequest.objects.create(post=self.post, sender=self.buyer, message='Bonjour')
+        ContactRequest.objects.create(post=self.post, sender=self.buyer, message='Toujours disponible ?')
+
+        call_command('refresh_dashboard_aggregates', verbosity=0)
+
+        stat = ContactStat.objects.get(post=self.post)
+        self.assertEqual(stat.count, 2)
+        self.assertEqual(stat.seller_id, self.seller.id)

@@ -6,8 +6,11 @@ from django.conf import settings
 from django.utils import timezone
 
 class Review(models.Model):
-    # L'annonce concernée par l'avis
-    post = models.ForeignKey('marketplace.Post', on_delete=models.CASCADE, related_name='reviews')
+    # L'annonce concernée par l'avis. CDC 3.10 : les avis liés à une annonce
+    # supprimée (purgée après 30 jours) sont conservés — SET_NULL, pas CASCADE.
+    post = models.ForeignKey(
+        'marketplace.Post', on_delete=models.SET_NULL, null=True, blank=True, related_name='reviews',
+    )
     # L'auteur de l'avis
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='reviews_written')
     # La personne évaluée (CDC 3.7 : l'une des deux parties de l'affaire conclue).
@@ -48,7 +51,8 @@ class Review(models.Model):
         return timezone.now() < self.created_at + timedelta(hours=48)
 
     def __str__(self):
-        return f"Avis de {self.user.full_name} sur {self.post.title}"
+        post_title = self.post.title if self.post else 'annonce supprimée'
+        return f"Avis de {self.user.full_name} sur {post_title}"
 
 class ContactRequest(models.Model):
     post = models.ForeignKey('marketplace.Post', on_delete=models.CASCADE, related_name='contact_requests')
@@ -99,6 +103,7 @@ class Notification(models.Model):
         ('CONTACT', 'Demande de contact'),
         ('EXCHANGE', 'Proposition d\'échange'),
         ('MESSAGE', 'Nouveau message'),
+        ('EXPIRATION', 'Annonce bientôt expirée'),
         ('SYSTEM', 'Système'),
     )
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='notifications')
@@ -114,3 +119,22 @@ class Notification(models.Model):
 
     def __str__(self):
         return f"Notification pour {self.user.full_name} : {self.title}"
+
+
+class ContactStat(models.Model):
+    """CDC 3.9 / 5.6 : agrégat quotidien des contacts reçus par annonce,
+    alimenté par la tâche planifiée horaire refresh_dashboard_aggregates —
+    même principe que marketplace.PostViewStat pour les vues."""
+
+    post = models.ForeignKey('marketplace.Post', on_delete=models.CASCADE, related_name='contact_stats')
+    seller = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='contact_stats')
+    date = models.DateField()
+    count = models.PositiveIntegerField(default=0)
+
+    class Meta:
+        unique_together = ('post', 'date')
+        verbose_name = "Statistique de contact"
+        ordering = ['-date']
+
+    def __str__(self):
+        return f"{self.post_id} - {self.date} ({self.count} contacts)"

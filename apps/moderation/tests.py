@@ -177,3 +177,31 @@ class DashboardTests(ModerationTestBase):
         response = self.client.get('/api/moderation/dashboard/')
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertIn('pending_reports_count', response.data)
+
+
+class LiftExpiredSanctionsCommandTests(ModerationTestBase):
+    def test_only_expired_temporary_suspensions_are_lifted(self):
+        from datetime import timedelta
+
+        from django.core.management import call_command
+        from django.utils import timezone
+
+        expired = Sanction.objects.create(
+            user=self.seller, sanction_type=Sanction.TYPE_SUSPENSION_TEMPORAIRE, reason='x',
+            issued_by=self.admin, ends_at=timezone.now() - timedelta(days=1),
+        )
+        expired.apply()
+        still_running = Sanction.objects.create(
+            user=self.seller, sanction_type=Sanction.TYPE_SUSPENSION_TEMPORAIRE, reason='y',
+            issued_by=self.admin, ends_at=timezone.now() + timedelta(days=5),
+        )
+
+        call_command('lift_expired_sanctions', verbosity=0)
+
+        expired.refresh_from_db()
+        still_running.refresh_from_db()
+        self.assertFalse(expired.is_active)
+        self.assertTrue(still_running.is_active)
+        self.seller.refresh_from_db()
+        self.assertTrue(self.seller.is_active)  # levée -> compte réactivé
+        self.assertTrue(AuditLog.objects.filter(action='SANCTION_AUTO_LIFTED').exists())

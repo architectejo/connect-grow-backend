@@ -1,5 +1,5 @@
 from django.contrib import admin
-from .models import City, Commune, Category, Favorite, Post, PostImage
+from .models import City, Commune, Category, Favorite, MarketplaceSettings, Post, PostImage
 
 @admin.register(City)
 class CityAdmin(admin.ModelAdmin):
@@ -23,8 +23,8 @@ class PostImageInline(admin.TabularInline):
 
 @admin.register(Post)
 class PostAdmin(admin.ModelAdmin):
-    list_display = ('title', 'post_type', 'price', 'currency', 'seller', 'is_delete', 'created_at')
-    list_filter = ('post_type', 'category', 'commune', 'currency', 'is_delete')
+    list_display = ('title', 'post_type', 'status', 'price', 'currency', 'seller', 'is_delete', 'expires_at')
+    list_filter = ('post_type', 'status', 'category', 'commune', 'currency', 'is_delete')
     search_fields = ('title', 'description')
     inlines = [PostImageInline]
 
@@ -32,3 +32,13 @@ class PostAdmin(admin.ModelAdmin):
 class FavoriteAdmin(admin.ModelAdmin):
     list_display = ('user', 'post', 'created_at')
     search_fields = ('user__email', 'user__phone', 'post__title')
+
+@admin.register(MarketplaceSettings)
+class MarketplaceSettingsAdmin(admin.ModelAdmin):
+    list_display = ('expiration_days', 'trash_retention_days', 'expiring_soon_warning_days')
+
+    def has_add_permission(self, request):
+        return not MarketplaceSettings.objects.exists()
+
+    def has_delete_permission(self, request, obj=None):
+        return False

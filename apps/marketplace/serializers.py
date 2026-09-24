@@ -88,12 +88,12 @@ class PostSerializer(serializers.ModelSerializer):
             'price', 'currency', 'condition', 'stock', 'is_price_negotiable',
             'is_exchangeable', 'main_image', 'images', 'views_count',
             'likes_count', 'comments_count', 'shares_count', 'created_at',
-            'visibility_score', 'visibility_rank', 'is_favorited', 'favorites_count',
-            'is_trending', 'is_sponsored',
+            'status', 'expires_at', 'visibility_score', 'visibility_rank',
+            'is_favorited', 'favorites_count', 'is_trending', 'is_sponsored',
         ]
         read_only_fields = [
             'seller', 'views_count', 'likes_count', 'comments_count', 'shares_count',
-            'created_at', 'visibility_score',
+            'created_at', 'status', 'expires_at', 'visibility_score',
         ]
 
     def get_visibility_rank(self, obj):

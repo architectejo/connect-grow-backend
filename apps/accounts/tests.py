@@ -210,3 +210,18 @@ class KycDocumentApiTests(APITestCase):
             self.client.post(reverse('kyc_decision', args=[doc.pk]), {'decision': KycDocument.STATUS_VALIDE})
         self.business_profile.refresh_from_db()
         self.assertTrue(self.business_profile.is_verified)
+
+
+class OtpCleanupCommandTests(TestCase):
+    def test_only_expired_codes_are_deleted(self):
+        from django.core.management import call_command
+
+        expired, _ = OtpCode.issue('+243811111111', OtpCode.PURPOSE_REGISTER)
+        expired.expires_at = timezone.now() - timedelta(minutes=1)
+        expired.save(update_fields=['expires_at'])
+        valid, _ = OtpCode.issue('+243822222222', OtpCode.PURPOSE_REGISTER)
+
+        call_command('cleanup_otp_codes', verbosity=0)
+
+        self.assertFalse(OtpCode.objects.filter(pk=expired.pk).exists())
+        self.assertTrue(OtpCode.objects.filter(pk=valid.pk).exists())
