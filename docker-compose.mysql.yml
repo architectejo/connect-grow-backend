@@ -35,5 +35,23 @@ services:
       db:
         condition: service_healthy
 
+  # Le conteneur cron doit pointer vers la même base que backend : sans cette
+  # section, il garderait le SQLite par défaut de son propre .env et les
+  # tâches planifiées (CDC 5.6) tourneraient sur une base vide et éphémère.
+  cron:
+    environment:
+      REDIS_HOST: redis
+      DB_ENGINE: mysql
+      DB_NAME: connecteplus
+      DB_USER: connecteplus
+      DB_PASSWORD: connecteplus
+      DB_HOST: db
+      DB_PORT: "3306"
+    depends_on:
+      redis:
+        condition: service_started
+      db:
+        condition: service_healthy
+
 volumes:
   db_data:
